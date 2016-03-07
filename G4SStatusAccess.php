@@ -12,67 +12,43 @@ class G4SStatusAccess
   private $openHabUser ='';
   private $openHabPassword ='';
   private $openHabIp ='';
+  private $savedArmState=null;
   
   function __construct($loginID, $passCode, $openHabUser, $openHabPassword, $openHabIp, $openHabPort)
     {
-        $this->loginID=$loginID;
-        $this->passWord='A'.$loginID;
-        $this->passCode=$passCode;
-        $this->openHabUser=$openHabUser;
-        $this->openHabPassword=$openHabPassword;
-        $this->openHabIp=$openHabIp;
-        $this->openHabPort=$openHabPort;
+      date_default_timezone_set('Europe/Copenhagen');
+      $this->loginID=$loginID;
+      $this->passWord='A'.$loginID;
+      $this->passCode=$passCode;
+      $this->openHabUser=$openHabUser;
+      $this->openHabPassword=$openHabPassword;
+      $this->openHabIp=$openHabIp;
+      $this->openHabPort=$openHabPort;
     }
   
   
   public function fire()
   {
     $savedArmState = null;
+    
     while(true)
     {
       $cookieJar = new \Symfony\Component\BrowserKit\CookieJar();
-      $client = new Client(array(), null, $cookieJar);
-      $guzzleClient = new \GuzzleHttp\Client(['verify' => false,'debug'=>false,'cookies' => true]);
-      $client->setClient($guzzleClient);
-      date_default_timezone_set('Europe/Copenhagen');
+          
+      $client = $this->setupGoutteClient($cookieJar);
       
       $crawler = $client->request('GET', 'https://homelink.g4s.dk/ELAS/WUApp/MainPage.aspx');
       
-      $html = $crawler->html();
-      $html = str_replace("</form>", "<input name='__EVENTTARGET'><input type='submit' value='x'></form>", $html);
-      /*
-        Remember to comment out line 299 in vendor\symfony\dom-crawler\Crawler.php
-      */
-      $crawler->add($html);
-      $form = $crawler->selectButton('x')->form();
-
-
+      $form = $this->getModdedForm($crawler);
+      
       $response = $client->submit($form, array('LoginID' => $this->loginID, 'Password' =>  $this->passWord, 'PassCode' => $this->passCode, '__EVENTTARGET' => 'SignInBtn'));
-      $response->filter('#CPStatusA')->each(function ($node) use (&$savedArmState){
-        $date = date('Y-m-d H:i:s');
-        echo $date . ' - ';
-        echo '                             ' . ' - ';
-        echo '   ' . ' - ';
-        if (strpos($node->text(), '-') !== FALSE)
-        {
-          $cpStatus = strtok($node->text(), ' ');
-        }
-        else
-        {
-          $cpStatus = $node->text();
-        }
-        echo $cpStatus  . ' - ';
-        if($savedArmState==$cpStatus)
-        {
-          //NOP
-        }
-        else
-        {
-          $this->sendCommand('Alarm',$node->text());
-        }
-        echo PHP_EOL;
-        $savedArmState=$cpStatus;
-      });
+      
+      $cpStatus = $this->retrieveStatusFromResponse($response);
+      
+      $this->ensureSmartHomeUpdate($cpStatus);
+      
+      echo PHP_EOL;
+
       $aspCookie = $cookieJar->get('ASP.NET_SessionId');
       $elasWUNAppCookie = $cookieJar->get('ElasWUNAppCookie');
       if(is_null($aspCookie) OR is_null($elasWUNAppCookie))
@@ -81,56 +57,118 @@ class G4SStatusAccess
         continue;
       }
       $cookieString = $aspCookie->getName().'='.$aspCookie->getValue().'; '.$elasWUNAppCookie->getName().'='.$elasWUNAppCookie->getValue();
-      
+    
       $request = new Request('POST', 'https://homelink.g4s.dk/ELAS/WUAPP/ajaxpro/WUNApp.BasicPage,WUNApp.ashx', [
             'Content-Type' => 'application/x-www-form-urlencoded',
             'Ajax-method' => 'GetCPInfo',
             'Ajax-session'=> 0,
             'Ajax-token' => 'ajaxpro',
-            'Accept' =>'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Encoding' => 'gzip, deflate, br',
-            'Accept-Language' => 'da,en-US;q=0.7,en;q=0.3',
+            'Accept' =>'*/*',
+            'Accept-Encoding' => 'gzip, deflate',
+            'Accept-Language' => 'da,en-US;q=0.8,en;q=0.6',
             'Connection' => 'keep-alive',
             'Referer' => 'https://homelink.g4s.dk/ELAS/WUAPP/noskin/home.aspx',
             'Origin'=>'https://homelink.g4s.dk',
-            'Cookie' => $cookieString
-        ]);
-        
+            'Cookie' => $cookieString,
+        ], ' ');
+      $guzzleClient=$client->getClient();  
       $gotSameTmsCounter=1;
+      $savedTime=null;
       while ($gotSameTmsCounter<5)
       {
         sleep(15);
-        $response=null;
-        $response = $guzzleClient->send($request);
-        $cPInfo=null;
-        $cPInfo = json_decode($response->getBody());
-        if($savedTime==$cPInfo->CurTime)
+        try
         {
-          $gotSameTmsCounter++;
+          $promise = $guzzleClient->sendAsync($request);
+          $promise->then(function ($response) use (&$gotSameTmsCounter, &$savedTime, &$savedArmState) {
+            echo $gotSameTmsCounter . ' - ';
+            $cPInfo = json_decode($response->getBody());
+            if($savedTime==$cPInfo->CurTime)
+            {
+              $gotSameTmsCounter++;
+            }
+            else
+            {
+              $gotSameTmsCounter=1;
+            }
+            if($cPInfo==null)
+              echo 'NULL - ';
+            $date = date('Y-m-d H:i:s');
+            echo $date . ' - ';
+            echo $response->getHeaders()['Date'][0] . ' - ';
+            echo $response->getStatusCode() . ' - ';
+            echo $cPInfo->ArmState . ' - ';
+            $this->ensureSmartHomeUpdate($cPInfo->ArmState);
+            $savedTime=$cPInfo->CurTime;
+            echo $savedTime . PHP_EOL;
+          });
+          $promise->wait();
         }
-        else
+        catch (\GuzzleHttp\Exception\ServerException $e)
         {
-          $gotSameTmsCounter=1;
+          echo 'Got server-exception: '. $e->getMessage();
+          break;
         }
-        $savedTime=$cPInfo->CurTime;
-        $date = date('Y-m-d H:i:s');
-        echo $date . ' - ';
-        echo $response->getHeaders()['Date'][0] . ' - ';
-        echo $response->getStatusCode() . ' - ';
-        echo $cPInfo->ArmState . ' - ';
-        if($savedArmState==$cPInfo->ArmState)
-        {
-          //NOP
-        }
-        else
-        {
-          $this->sendCommand('Alarm',$cPInfo->ArmState);
-        }
-        $savedArmState=$cPInfo->ArmState;
-        echo $cPInfo->CurTime . PHP_EOL;
+        
       }
+      
     }
     return;
+  }
+  
+  private function setupGoutteClient($cookieJar)
+  {
+    $client = new Client(array(), null, $cookieJar);
+    $guzzleClient = new \GuzzleHttp\Client(['verify' => false,'debug'=>false,'cookies' => true]);
+    $client->setClient($guzzleClient);
+    return $client;
+  }
+  
+  private function getModdedForm($crawler)
+  {
+    $html = $crawler->html();
+    $html = str_replace("</form>", "<input name='__EVENTTARGET'><input type='submit' value='x'></form>", $html);
+    /*
+      Remember to comment out line 299 in vendor\symfony\dom-crawler\Crawler.php
+    */
+    $crawler->add($html);
+    return $crawler->selectButton('x')->form();
+  }
+  
+  private function retrieveStatusFromResponse($response)
+  {
+    $cpStatus = null;
+    $response->filter('#CPStatusA')->each(function ($node) use (&$cpStatus){
+      echo '0 - ';
+      $date = date('Y-m-d H:i:s');
+      echo $date . ' - ';
+      echo '                             ' . ' - ';
+      echo '   ' . ' - ';
+      if (strpos($node->text(), '-') !== FALSE)
+      {
+        $cpStatus = strtok($node->text(), ' ');
+      }
+      else
+      {
+        $cpStatus = $node->text();
+      }
+      echo $cpStatus  . ' - ';
+      
+    });
+    return $cpStatus;
+  }
+  
+  private function ensureSmartHomeUpdate($cpStatus)
+  {
+    if($this->savedArmState==$cpStatus)
+    {
+      //NOP
+    }
+    else
+    {
+      $this->sendCommand('Alarm',$cpStatus);
+      $this->savedArmState=$cpStatus;
+    }
   }
   
   public function sendCommand($item, $data) {
