@@ -3,6 +3,7 @@ require_once 'vendor/autoload.php';
 use Goutte\Client;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Cookie\SetCookie;
+use Symfony\Component\BrowserKit\CookieJar;
 
 class G4SStatusAccess
 {
@@ -13,6 +14,8 @@ class G4SStatusAccess
   private $openHabPassword ='';
   private $openHabIp ='';
   private $savedArmState=null;
+  private $savedTime=null;
+  private $gotSameTmsCounter = 1;
   
   function __construct($loginID, $passCode, $openHabUser, $openHabPassword, $openHabIp, $openHabPort)
     {
@@ -29,11 +32,9 @@ class G4SStatusAccess
   
   public function fire()
   {
-    $savedArmState = null;
-    
     while(true)
     {
-      $cookieJar = new \Symfony\Component\BrowserKit\CookieJar();
+      $cookieJar = new CookieJar();
           
       $client = $this->setupGoutteClient($cookieJar);
       
@@ -49,58 +50,36 @@ class G4SStatusAccess
       
       echo PHP_EOL;
 
-      $aspCookie = $cookieJar->get('ASP.NET_SessionId');
-      $elasWUNAppCookie = $cookieJar->get('ElasWUNAppCookie');
-      if(is_null($aspCookie) OR is_null($elasWUNAppCookie))
+      $cookieString = $this->extractCookieString($cookieJar);
+      if(!$cookieString)
       {
         echo 'aspCookie or elasWUNAppCookie is null - Continuing' . PHP_EOL;
         continue;
       }
-      $cookieString = $aspCookie->getName().'='.$aspCookie->getValue().'; '.$elasWUNAppCookie->getName().'='.$elasWUNAppCookie->getValue();
     
-      $request = new Request('POST', 'https://homelink.g4s.dk/ELAS/WUAPP/ajaxpro/WUNApp.BasicPage,WUNApp.ashx', [
-            'Content-Type' => 'application/x-www-form-urlencoded',
-            'Ajax-method' => 'GetCPInfo',
-            'Ajax-session'=> 0,
-            'Ajax-token' => 'ajaxpro',
-            'Accept' =>'*/*',
-            'Accept-Encoding' => 'gzip, deflate',
-            'Accept-Language' => 'da,en-US;q=0.8,en;q=0.6',
-            'Connection' => 'keep-alive',
-            'Referer' => 'https://homelink.g4s.dk/ELAS/WUAPP/noskin/home.aspx',
-            'Origin'=>'https://homelink.g4s.dk',
-            'Cookie' => $cookieString,
-        ], ' ');
-      $guzzleClient=$client->getClient();  
-      $gotSameTmsCounter=1;
-      $savedTime=null;
-      while ($gotSameTmsCounter<5)
+      $request = $this->buildAjaxRequest($cookieString);
+      
+      $guzzleClient = $this->convertToGuzzleClient($client);  
+        
+      $this->gotSameTmsCounter=0; //Reset counter
+      while ($this->gotSameTmsCounter<5)
       {
         sleep(15);
         try
         {
           $promise = $guzzleClient->sendAsync($request);
-          $promise->then(function ($response) use (&$gotSameTmsCounter, &$savedTime, &$savedArmState) {
-            echo $gotSameTmsCounter . ' - ';
-            $cPInfo = json_decode($response->getBody());
-            if($savedTime==$cPInfo->CurTime)
-            {
-              $gotSameTmsCounter++;
-            }
-            else
-            {
-              $gotSameTmsCounter=1;
-            }
+          $promise->then(function ($response) {
+            echo $this->gotSameTmsCounter . ' - ';
+            
+          
+            $cPInfo = $this->retrieveStatusFromAjaxResponse($response);
+            
             if($cPInfo==null)
-              echo 'NULL - ';
-            $date = date('Y-m-d H:i:s');
-            echo $date . ' - ';
-            echo $response->getHeaders()['Date'][0] . ' - ';
-            echo $response->getStatusCode() . ' - ';
-            echo $cPInfo->ArmState . ' - ';
+              echo 'NULL - '; //actually should do something with continue
+            
+            $this->timeFromAlarmPanelDuplicateNumber($cPInfo->CurTime);
+
             $this->ensureSmartHomeUpdate($cPInfo->ArmState);
-            $savedTime=$cPInfo->CurTime;
-            echo $savedTime . PHP_EOL;
           });
           $promise->wait();
         }
@@ -158,6 +137,18 @@ class G4SStatusAccess
     return $cpStatus;
   }
   
+  private function retrieveStatusFromAjaxResponse($response)
+  {
+    $cPInfo = json_decode($response->getBody()); 
+    $date = date('Y-m-d H:i:s');
+    echo $date . ' - ';
+    echo $response->getHeaders()['Date'][0] . ' - ';
+    echo $response->getStatusCode() . ' - ';
+    echo $cPInfo->ArmState . ' - ';
+    echo $cPInfo->CurTime . PHP_EOL;
+    return $cPInfo;
+  }
+  
   private function ensureSmartHomeUpdate($cpStatus)
   {
     if($this->savedArmState==$cpStatus)
@@ -169,6 +160,56 @@ class G4SStatusAccess
       $this->sendCommand('Alarm',$cpStatus);
       $this->savedArmState=$cpStatus;
     }
+  }
+  
+  private function extractCookieString($cookieJar)
+  {
+    $aspCookie = $cookieJar->get('ASP.NET_SessionId');
+    $elasWUNAppCookie = $cookieJar->get('ElasWUNAppCookie');
+    if(is_null($aspCookie) OR is_null($elasWUNAppCookie))
+    {
+      return null;
+    }
+    else {
+      $cookieString = $aspCookie->getName().'='.$aspCookie->getValue().'; '.$elasWUNAppCookie->getName().'='.$elasWUNAppCookie->getValue();
+      return $cookieString;
+    }
+    
+  }
+  
+  private function convertToGuzzleClient($client)
+  {
+    return $client->getClient();
+  }
+  
+  private function buildAjaxRequest($cookieString)
+  {
+    return new Request('POST', 'https://homelink.g4s.dk/ELAS/WUAPP/ajaxpro/WUNApp.BasicPage,WUNApp.ashx', [
+            'Content-Type' => 'application/x-www-form-urlencoded',
+            'Ajax-method' => 'GetCPInfo',
+            'Ajax-session'=> 0,
+            'Ajax-token' => 'ajaxpro',
+            'Accept' =>'*/*',
+            'Accept-Encoding' => 'gzip, deflate',
+            'Accept-Language' => 'da,en-US;q=0.8,en;q=0.6',
+            'Connection' => 'keep-alive',
+            'Referer' => 'https://homelink.g4s.dk/ELAS/WUAPP/noskin/home.aspx',
+            'Origin'=>'https://homelink.g4s.dk',
+            'Cookie' => $cookieString,
+        ], ' ');
+  }
+  
+  private function timeFromAlarmPanelDuplicateNumber($timeFromAlarmPanel)
+  {
+    if($this->savedTime==$timeFromAlarmPanel)
+    {
+      $this->gotSameTmsCounter++;
+    }
+    else
+    {
+      $this->gotSameTmsCounter=1;
+    }
+    $this->savedTime=$timeFromAlarmPanel;
   }
   
   public function sendCommand($item, $data) {
