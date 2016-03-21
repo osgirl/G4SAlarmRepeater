@@ -2,6 +2,27 @@
 
 PHP-project to retrieve alarm-status from G4S SmartAlarm P5 or P7 and relay to openHAB.
 
+Requirements:
+php-cli
+php-curl
+
+Installation:
+1) Clone project
+
+2) Install composer into the directory
+(e.g. run this command:
+curl -sS https://getcomposer.org/installer | php
+)
+
+3) Run composer install
+(e.g.
+php composer.phar install
+
+4) Comment line 299 in this file:
+vendor/symfony/dom-crawler/Crawler.php
+
+
+
 Requires 6 arguments to run:
 
 loginID //This is the number for the panel (in danish: Anlægsnummer)
