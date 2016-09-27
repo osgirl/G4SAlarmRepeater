@@ -88,6 +88,11 @@ class G4SStatusAccess
           echo 'Got server-exception: '. $e->getMessage();
           break;
         }
+	catch (\GuzzleHttp\Exception\ConnectException $e)
+	{
+          echo 'Got connect-exception: '. $e->getMessage();
+	  break;
+	}
         
       }
       
