@@ -38,12 +38,25 @@ class G4SStatusAccess
           
       $client = $this->setupGoutteClient($cookieJar);
       
-      $crawler = $client->request('GET', 'https://homelink.g4s.dk/ELAS/WUApp/MainPage.aspx');
+      try {
+        $crawler = $client->request('GET', 'https://homelink.g4s.dk/ELAS/WUApp/MainPage.aspx');
+      }
+      catch (\GuzzleHttp\Exception\ConnectException $exception)
+      {
+        echo 'Seems like i can catch the exception here' . PHP_EOL;
+        throw $exception;
+      }
       
       $form = $this->getModdedForm($crawler);
       
-      $response = $client->submit($form, array('LoginID' => $this->loginID, 'Password' =>  $this->passWord, 'PassCode' => $this->passCode, '__EVENTTARGET' => 'SignInBtn'));
-      
+      try {
+      	$response = $client->submit($form, array('LoginID' => $this->loginID, 'Password' =>  $this->passWord, 'PassCode' => $this->passCode, '__EVENTTARGET' => 'SignInBtn'));
+      }
+      catch (\GuzzleHttp\Exception\ConnectException $e)
+      {
+          echo 'Got connect-exception: '. $e->getMessage();
+	  continue;
+      }
       $cpStatus = $this->retrieveStatusFromResponse($response);
       
       $this->ensureSmartHomeUpdate($cpStatus);
@@ -74,12 +87,14 @@ class G4SStatusAccess
           
             $cPInfo = $this->retrieveStatusFromAjaxResponse($response);
             
-            if($cPInfo==null)
+            if($cPInfo==null) {
+              $this->timeFromAlarmPanelDuplicateNumber(null);
               echo 'NULL - '; //actually should do something with continue
-            
-            $this->timeFromAlarmPanelDuplicateNumber($cPInfo->CurTime);
+            } else {
+              $this->timeFromAlarmPanelDuplicateNumber($cPInfo->CurTime);
 
-            $this->ensureSmartHomeUpdate($cPInfo->ArmState);
+              $this->ensureSmartHomeUpdate($cPInfo->ArmState);
+            }
           });
           $promise->wait();
         }
@@ -145,12 +160,16 @@ class G4SStatusAccess
   private function retrieveStatusFromAjaxResponse($response)
   {
     $cPInfo = json_decode($response->getBody()); 
-    $date = date('Y-m-d H:i:s');
-    echo $date . ' - ';
-    echo $response->getHeaders()['Date'][0] . ' - ';
-    echo $response->getStatusCode() . ' - ';
-    echo $cPInfo->ArmState . ' - ';
-    echo $cPInfo->CurTime . PHP_EOL;
+    if($cPInfo) {
+      $date = date('Y-m-d H:i:s');
+      echo $date . ' - ';
+      echo $response->getHeaders()['Date'][0] . ' - ';
+      echo $response->getStatusCode() . ' - ';
+      echo $cPInfo->ArmState . ' - ';
+      echo $cPInfo->CurTime . PHP_EOL;
+    } else {
+      echo 'cpInfo is empty' . PHP_EOL;
+    }
     return $cPInfo;
   }
   
@@ -195,8 +214,8 @@ class G4SStatusAccess
             'Ajax-session'=> 0,
             'Ajax-token' => 'ajaxpro',
             'Accept' =>'*/*',
-            'Accept-Encoding' => 'gzip, deflate',
-            'Accept-Language' => 'da,en-US;q=0.8,en;q=0.6',
+            'Accept-Encoding' => 'gzip, deflate, br',
+            'Accept-Language' => 'da-DK,da;q=0.8,en-US;q=0.6,en;q=0.4',
             'Connection' => 'keep-alive',
             'Referer' => 'https://homelink.g4s.dk/ELAS/WUAPP/noskin/home.aspx',
             'Origin'=>'https://homelink.g4s.dk',
@@ -220,6 +239,7 @@ class G4SStatusAccess
   public function sendCommand($item, $data) {
     echo 'Sending - ';
       $url = 'http://'.$this->openHabUser.':'.$this->openHabPassword.'@'.$this->openHabIp.':'.$this->openHabPort.'/rest/items/' . $item;
+      //$url = 'http://'.$this->openHabIp.':'.$this->openHabPort.'/rest/items/' . $item;
       $options = array(
         'http' => array(
             'header'  => "Content-type: text/plain\r\n",
